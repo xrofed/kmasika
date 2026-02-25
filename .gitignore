@@ -1,0 +1,6 @@
+.env
+node_modules/
+-e 
+# WhatsApp Bot session
+.wwebjs_auth/
+.wwebjs_cache/
