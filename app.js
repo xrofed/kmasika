@@ -1,68 +1,68 @@
-// app.js - FINAL VERSION (FIXED)
-require('dotenv').config({
-debug: false, quiet: true
-});
+// app.js — Vercel-compatible (export app, jangan listen)
+require('dotenv').config({ debug: false, quiet: true });
+
 const express = require('express');
 const mongoose = require('mongoose');
 const path = require('path');
-// Tidak perlu import model di app.js jika tidak digunakan langsung di sini, 
-// tapi aku biarkan saja agar tidak mengubah kodemu terlalu banyak.
-const Manga = require('./models/Manga'); 
-const Chapter = require('./models/Chapter');
 
-// IMPORT RUTE API (PENTING)
+const Manga = require('./models/Manga');
+const Chapter = require('./models/Chapter');
 const apiRoutes = require('./routes/api');
 
-// IMPORT WHATSAPP BOT
-const { initWhatsAppBot } = require('./bot/whatsapp');
-
 const app = express();
-const PORT = process.env.PORT || 3000;
-const WEBSITE_URL = process.env.SITE_URL || `http://localhost:${PORT}`;
+const WEBSITE_URL = process.env.SITE_URL || 'http://localhost:3000';
 
-// ==========================================
-// MIDDLEWARE (TAMBAHAN PENTING UNTUK BACA JSON DARI FLUTTER)
-// ==========================================
-app.use(express.json()); // Membaca tipe application/json
-app.use(express.urlencoded({ extended: true })); // Membaca tipe application/x-www-form-urlencoded
-
+// ── MIDDLEWARE ────────────────────────────────────────────────────
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 app.use(express.static('public'));
-
-// PASTIKAN API ROUTE ADA DI BAWAH MIDDLEWARE EXPRESS.JSON
 app.use('/api', apiRoutes);
 
-// ==========================================
-// SERVER STARTUP
-// ==========================================
+// ── DATABASE CONNECTION (lazy — connect sekali, cache di Vercel) ──
+let isConnected = false;
 
-const DB_URI = process.env.DB_URI;
+async function connectDB() {
+  if (isConnected) return;
 
-if (!DB_URI) {
-console.error("FATAL ERROR: DB_URI is not defined in environment variables.");
-process.exit(1);
+  const DB_URI = process.env.DB_URI;
+  if (!DB_URI) throw new Error('DB_URI tidak terdefinisi di environment variables!');
+
+  await mongoose.connect(DB_URI, { serverSelectionTimeoutMS: 30000 });
+  isConnected = true;
+  console.log('MongoDB connected');
 }
 
-const startServer = async () => {
-try {
-await mongoose.connect(DB_URI, {
-serverSelectionTimeoutMS: 30000
-});
-console.log('Successfully connected to MongoDB...');
-
-app.listen(PORT, () => {
-console.log(`Server is running on port: ${PORT}`);
-console.log(`Access at: ${WEBSITE_URL}`);
-
-// Jalankan WhatsApp Bot setelah server siap
-initWhatsAppBot();
+// Middleware: konek DB sebelum setiap request (Vercel serverless pattern)
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('DB Connection Error:', err.message);
+    res.status(503).json({ success: false, message: 'Database tidak tersedia.' });
+  }
 });
 
-} catch (err) {
-console.error('Failed to connect to MongoDB. Server will not start.', err);
-process.exit(1);
+// ── JALANKAN BOT WA HANYA DI LUAR VERCEL ─────────────────────────
+// Vercel = serverless, tidak bisa jalankan proses persisten (Puppeteer/WA)
+const isVercel = !!process.env.VERCEL;
+
+if (!isVercel) {
+  const { initWhatsAppBot } = require('./bot/whatsapp');
+  const PORT = process.env.PORT || 3000;
+
+  connectDB().then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server berjalan di port ${PORT} — ${WEBSITE_URL}`);
+      initWhatsAppBot();
+    });
+  }).catch(err => {
+    console.error('Gagal koneksi DB, server tidak jalan:', err);
+    process.exit(1);
+  });
 }
-};
 
-startServer();
+// ── EXPORT untuk Vercel ───────────────────────────────────────────
+module.exports = app;
