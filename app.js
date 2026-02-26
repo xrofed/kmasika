@@ -5,7 +5,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const path = require('path');
 
-const Manga   = require('./models/Manga');
+const Manga = require('./models/Manga');
 const Chapter = require('./models/Chapter');
 const apiRoutes = require('./routes/api');
 
@@ -17,6 +17,22 @@ app.use(express.urlencoded({ extended: true }));
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 app.use(express.static('public'));
+
+// ── TELEGRAM WEBHOOK ENDPOINT ─────────────────────────────────────
+// Harus didaftarkan SEBELUM middleware DB agar Telegram tidak timeout
+const { handleUpdate } = require('./bot/telegram');
+app.post('/api/telegram/webhook', async (req, res) => {
+  // Langsung reply 200 ke Telegram agar tidak retry
+  res.sendStatus(200);
+  // Proses update secara async
+  try {
+    await handleUpdate(req.body);
+  } catch (err) {
+    console.error('[Webhook] Error:', err.message);
+  }
+});
+
+app.use('/api', apiRoutes);
 
 // ── DATABASE CONNECTION (lazy + cached untuk Vercel) ──────────────
 let isConnected = false;
@@ -30,7 +46,6 @@ async function connectDB() {
   console.log('MongoDB connected');
 }
 
-// Middleware DB — berlaku untuk SEMUA route termasuk webhook
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -41,30 +56,18 @@ app.use(async (req, res, next) => {
   }
 });
 
-// ── TELEGRAM WEBHOOK ──────────────────────────────────────────────
-// Didaftarkan SETELAH middleware DB agar MongoDB sudah connect
-const { handleUpdate } = require('./bot/telegram');
-
-app.post('/api/telegram/webhook', async (req, res) => {
-  // Balas 200 dulu ke Telegram agar tidak retry
-  res.sendStatus(200);
-  // Proses update async (DB sudah pasti connect di sini)
-  try {
-    await handleUpdate(req.body);
-  } catch (err) {
-    console.error('[Webhook] Error:', err.message);
-  }
-});
-
-// ── API ROUTES ────────────────────────────────────────────────────
-app.use('/api', apiRoutes);
-
-// ── LOCAL DEV ─────────────────────────────────────────────────────
+// ── LOCAL DEV: jalankan server biasa ─────────────────────────────
 if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 3000;
   connectDB().then(() => {
-    app.listen(PORT, () => console.log(`Server jalan di port ${PORT}`));
-  }).catch(err => { console.error(err); process.exit(1); });
+    app.listen(PORT, () => {
+      console.log(`Server jalan di port ${PORT}`);
+    });
+  }).catch(err => {
+    console.error('Gagal start server:', err);
+    process.exit(1);
+  });
 }
 
+// ── EXPORT untuk Vercel ───────────────────────────────────────────
 module.exports = app;

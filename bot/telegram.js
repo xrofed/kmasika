@@ -15,15 +15,8 @@ const User = require('../models/User');
 
 // ─── KONFIGURASI ─────────────────────────────────────────────────
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
+const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID; // Chat ID admin Telegram
 const BASE_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
-
-if (!BOT_TOKEN) {
-  console.error('[TG] ⚠️  TELEGRAM_BOT_TOKEN tidak diset! Bot tidak akan berfungsi.');
-}
-if (!ADMIN_CHAT_ID) {
-  console.warn('[TG] ⚠️  TELEGRAM_ADMIN_CHAT_ID tidak diset! Notifikasi admin tidak akan terkirim.');
-}
 
 const PAKET = {
   '1': { nama: 'Paket 7 Hari',  harga: 'Rp 5.000',  nominal: 5000,  durasi: 7  },
@@ -37,7 +30,7 @@ async function sendMessage(chatId, text, extra = {}) {
     await axios.post(`${BASE_URL}/sendMessage`, {
       chat_id: chatId,
       text,
-      parse_mode: 'HTML',
+      parse_mode: 'Markdown',
       ...extra,
     });
   } catch (err) {
@@ -51,7 +44,7 @@ async function sendPhoto(chatId, fileIdOrUrl, caption = '', extra = {}) {
       chat_id: chatId,
       photo: fileIdOrUrl,
       caption,
-      parse_mode: 'HTML',
+      parse_mode: 'Markdown',
       ...extra,
     });
   } catch (err) {
@@ -76,7 +69,7 @@ async function editMessageText(chatId, messageId, text, extra = {}) {
       chat_id: chatId,
       message_id: messageId,
       text,
-      parse_mode: 'HTML',
+      parse_mode: 'Markdown',
       ...extra,
     });
   } catch (err) {
@@ -102,9 +95,7 @@ async function getSession(telegramUserId) {
 // ─── MAIN WEBHOOK HANDLER ────────────────────────────────────────
 
 async function handleUpdate(update) {
-  if (!update) return;
-
-  // Handle callback query (tombol inline)
+  // Handle callback query (tombol inline dari admin)
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query);
     return;
@@ -112,8 +103,6 @@ async function handleUpdate(update) {
 
   const msg = update.message;
   if (!msg) return;
-
-  console.log(`[TG] Update dari ${msg.from?.id} (@${msg.from?.username}): ${msg.text || '[media]'}`);
 
   const chatId = msg.chat.id;
   const userId = String(msg.from.id);
@@ -127,7 +116,7 @@ async function handleUpdate(update) {
   if (session?.status === 'waiting_googleid') {
     if (text.length < 10) {
       await sendMessage(chatId,
-        `⚠️ Google ID tidak valid. Salin tepat dari aplikasi.\n\nCara cek: <b>Buka app → Profil → salin ID di bawah email</b>`
+        `⚠️ Google ID tidak valid. Salin tepat dari aplikasi.\n\nCara cek: *Buka app → Profil → salin ID di bawah email*`
       );
       return;
     }
@@ -141,8 +130,8 @@ async function handleUpdate(update) {
     const paket = PAKET[session.paketId];
     await sendMessage(chatId,
       `✅ Google ID tersimpan!\n\n` +
-      `📦 <b>${paket.nama}</b> — <b>${paket.harga}</b>\n\n` +
-      `Silakan bayar via <b>QRIS</b> di bawah ini, lalu kirim <b>foto bukti transfer</b> ke sini.`
+      `📦 *${paket.nama}* — *${paket.harga}*\n\n` +
+      `Silakan bayar via *QRIS* di bawah ini, lalu kirim *foto bukti transfer* ke sini.`
     );
 
     // Kirim QRIS
@@ -156,7 +145,7 @@ async function handleUpdate(update) {
 
     if (!hasPhoto && !textLow.includes('sudah') && !textLow.includes('bayar') && !textLow.includes('transfer')) {
       await sendMessage(chatId,
-        `⏳ Kirim <b>foto/screenshot bukti transfer</b> setelah selesai membayar.`
+        `⏳ Kirim *foto/screenshot bukti transfer* setelah selesai membayar.`
       );
       return;
     }
@@ -172,8 +161,8 @@ async function handleUpdate(update) {
 
     const paket = PAKET[session.paketId];
     await sendMessage(chatId,
-      `📋 <b>Verifikasi Nominal</b>\n\n` +
-      `Harga paket: <b>${paket.harga}</b>\n\n` +
+      `📋 *Verifikasi Nominal*\n\n` +
+      `Harga paket: *${paket.harga}*\n\n` +
       `Ketik nominal yang kamu transfer (angka saja).\n` +
       `Contoh: \`${paket.nominal}\``
     );
@@ -202,9 +191,9 @@ async function handleUpdate(update) {
     if (!session.nominalValid) {
       // Nominal KURANG — tolak otomatis
       await sendMessage(chatId,
-        `❌ <b>Pembayaran Tidak Valid</b>\n\n` +
-        `Nominal yang kamu masukkan: <b>Rp ${nominal.toLocaleString('id-ID')}</b>\n` +
-        `Harga paket: <b>${paket.harga}</b>\n\n` +
+        `❌ *Pembayaran Tidak Valid*\n\n` +
+        `Nominal yang kamu masukkan: *Rp ${nominal.toLocaleString('id-ID')}*\n` +
+        `Harga paket: *${paket.harga}*\n\n` +
         `Nominal kurang dari harga paket. Pesanan dibatalkan otomatis.\n\n` +
         `Ketik /beli untuk mencoba lagi.`
       );
@@ -215,7 +204,7 @@ async function handleUpdate(update) {
       // Notif admin juga
       if (ADMIN_CHAT_ID) {
         await sendMessage(ADMIN_CHAT_ID,
-          `⚠️ <b>Pembayaran Ditolak Otomatis</b>\n\n` +
+          `⚠️ *Pembayaran Ditolak Otomatis*\n\n` +
           `👤 @${session.telegramUsername || session.telegramFirstName}\n` +
           `📦 ${paket.nama}\n` +
           `💰 Nominal klaim: Rp ${nominal.toLocaleString('id-ID')} (kurang dari ${paket.harga})`
@@ -226,10 +215,10 @@ async function handleUpdate(update) {
 
     // Nominal OK — kirim ke admin untuk konfirmasi akhir
     await sendMessage(chatId,
-      `✅ <b>Nominal Sesuai!</b>\n\n` +
+      `✅ *Nominal Sesuai!*\n\n` +
       `Pesananmu sedang diverifikasi admin.\n` +
-      `Premium aktif dalam <b>1–5 menit</b> ⚡\n\n` +
-      `Terima kasih sudah berlangganan <b>Doujin Desu Premium</b> 🎉`
+      `Premium aktif dalam *1–5 menit* ⚡\n\n` +
+      `Terima kasih sudah berlangganan *Doujin Desu Premium* 🎉`
     );
 
     await notifikasiAdmin(session, chatId);
@@ -256,7 +245,7 @@ async function handleUpdate(update) {
 // ─── MENU UTAMA ──────────────────────────────────────────────────
 async function sendMenu(chatId, firstName) {
   await sendMessage(chatId,
-    `👋 Halo <b>${firstName}</b>! Selamat datang di <b>Doujin Desu Premium</b>\n\n` +
+    `👋 Halo *${firstName}*! Selamat datang di *Doujin Desu Premium*\n\n` +
     `Pilih paket berlangganan:`,
     {
       reply_markup: {
@@ -311,14 +300,24 @@ async function handleCallbackQuery(callbackQuery) {
     });
 
     await editMessageText(chatId, msgId,
-      `📦 <b>${paket.nama}</b> — <b>${paket.harga}</b>\n\n` +
-      `Untuk melanjutkan, kirimkan <b>Google ID</b> akun kamu.\n\n` +
-      `📌 Cara cek: <b>Buka app → Profil → salin ID di bawah email</b>`
+      `📦 *${paket.nama}* — *${paket.harga}*\n\n` +
+      `Untuk melanjutkan, kirimkan *Google ID* akun kamu.\n\n` +
+      `📌 Cara cek: *Buka app → Profil → salin ID di bawah email*`
     );
     return;
   }
 
-  // Konfirmasi order hanya dari Flutter app (bukan dari Telegram)
+  // Admin: konfirmasi order
+  if (data.startsWith('confirm_')) {
+    await handleAdminConfirm(callbackQuery, data.replace('confirm_', ''));
+    return;
+  }
+
+  // Admin: tolak order
+  if (data.startsWith('reject_')) {
+    await handleAdminReject(callbackQuery, data.replace('reject_', ''));
+    return;
+  }
 }
 
 // ─── STATUS PESANAN ──────────────────────────────────────────────
@@ -341,7 +340,7 @@ async function handleStatus(chatId, userId) {
   }[order.status] || order.status;
 
   await sendMessage(chatId,
-    `📋 <b>Status Pesanan Terakhir</b>\n\n` +
+    `📋 *Status Pesanan Terakhir*\n\n` +
     `📦 ${order.paketNama}\n` +
     `💰 ${order.paketHarga}\n` +
     `📊 Status: ${statusLabel}\n` +
@@ -356,17 +355,17 @@ async function kirimQRIS(chatId, paket) {
   if (qrisFileId) {
     // Pakai file_id (lebih cepat, sudah di-cache Telegram)
     await sendPhoto(chatId, qrisFileId,
-      `📲 <b>Scan QR ini untuk membayar via QRIS</b>\n` +
-      `Nominal: <b>${paket.harga}</b>\n` +
-      `<i>Mendukung semua e-wallet & mobile banking</i>`
+      `📲 *Scan QR ini untuk membayar via QRIS*\n` +
+      `Nominal: *${paket.harga}*\n` +
+      `_Mendukung semua e-wallet & mobile banking_`
     );
   } else {
     // Fallback: kirim URL gambar dari public folder
     const qrisUrl = `${process.env.SITE_URL}/qris.png`;
     await sendPhoto(chatId, qrisUrl,
-      `📲 <b>Scan QR ini untuk membayar via QRIS</b>\n` +
-      `Nominal: <b>${paket.harga}</b>\n` +
-      `<i>Mendukung semua e-wallet & mobile banking</i>`
+      `📲 *Scan QR ini untuk membayar via QRIS*\n` +
+      `Nominal: *${paket.harga}*\n` +
+      `_Mendukung semua e-wallet & mobile banking_`
     );
   }
 }
@@ -374,27 +373,105 @@ async function kirimQRIS(chatId, paket) {
 // ─── NOTIFIKASI ADMIN ────────────────────────────────────────────
 async function notifikasiAdmin(order, userChatId) {
   if (!ADMIN_CHAT_ID) {
-    console.warn('[TG] TELEGRAM<i>ADMIN</i>CHAT_ID tidak diset!');
+    console.warn('[TG] TELEGRAM_ADMIN_CHAT_ID tidak diset!');
     return;
   }
 
   const teks =
-    `🔔 <b>Pesanan Baru — Verifikasi Diperlukan</b>\n\n` +
+    `🔔 *Pesanan Baru — Verifikasi Diperlukan*\n\n` +
     `👤 User: @${order.telegramUsername || order.telegramFirstName} (ID: ${order.telegramUserId})\n` +
     `🆔 Google ID: \`${order.googleId}\`\n` +
     `📦 Paket: ${order.paketNama}\n` +
     `💰 Harga: ${order.paketHarga}\n` +
-    `💵 Klaim bayar: <b>Rp ${(order.nominalDibayar || 0).toLocaleString('id-ID')}</b> ${order.nominalValid ? '✅' : '❌'}\n` +
+    `💵 Klaim bayar: *Rp ${(order.nominalDibayar || 0).toLocaleString('id-ID')}* ${order.nominalValid ? '✅' : '❌'}\n` +
     `🕐 ${new Date().toLocaleString('id-ID')}\n\n` +
-    `📱 <b>Buka Flutter Admin → Pesanan Pending untuk konfirmasi.</b>`;
+    `*Cek bukti bayar di atas, lalu konfirmasi:*`;
 
   // Kirim bukti bayar dulu jika ada
   if (order.buktiBayarFileId) {
     await sendPhoto(ADMIN_CHAT_ID, order.buktiBayarFileId, `📎 Bukti bayar dari order \`${order._id}\``);
   }
 
-  // Kirim teks — konfirmasi dilakukan via Flutter app
-  await sendMessage(ADMIN_CHAT_ID, teks);
+  // Kirim teks + tombol konfirmasi
+  await sendMessage(ADMIN_CHAT_ID, teks, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '✅ Konfirmasi & Aktifkan', callback_data: `confirm_${order._id}` },
+          { text: '❌ Tolak', callback_data: `reject_${order._id}` },
+        ],
+      ],
+    },
+  });
+}
+
+// ─── ADMIN: KONFIRMASI ORDER ─────────────────────────────────────
+async function handleAdminConfirm(callbackQuery, orderId) {
+  const msgId = callbackQuery.message.message_id;
+  const adminChatId = callbackQuery.message.chat.id;
+
+  // Verifikasi bahwa yang klik adalah admin
+  if (String(adminChatId) !== String(ADMIN_CHAT_ID)) {
+    await answerCallbackQuery(callbackQuery.id, '⛔ Hanya admin yang bisa konfirmasi.');
+    return;
+  }
+
+  const result = await aktivasiPremiumById(orderId);
+
+  if (result.success) {
+    // Update pesan admin
+    await editMessageText(adminChatId, msgId,
+      `✅ *Dikonfirmasi oleh admin*\n\n` +
+      `Order ID: \`${orderId}\`\n` +
+      `Google ID: \`${result.order.googleId}\`\n` +
+      `Paket: ${result.order.paketNama}\n` +
+      `Premium aktif sampai: *${getExpDate(result.order.paketDurasi)}*`
+    );
+
+    // Notif ke user
+    await sendMessage(result.order.telegramUserId,
+      `🎉 *Premium Aktif!*\n\n` +
+      `Paket *${result.order.paketNama}* sudah diaktifkan!\n` +
+      `Berlaku sampai: *${getExpDate(result.order.paketDurasi)}*\n\n` +
+      `Selamat menikmati akses tanpa batas! 📚✨`
+    );
+
+    await answerCallbackQuery(callbackQuery.id, '✅ Premium berhasil diaktifkan!');
+  } else {
+    await answerCallbackQuery(callbackQuery.id, `❌ Gagal: ${result.message}`);
+  }
+}
+
+// ─── ADMIN: TOLAK ORDER ──────────────────────────────────────────
+async function handleAdminReject(callbackQuery, orderId) {
+  const msgId = callbackQuery.message.message_id;
+  const adminChatId = callbackQuery.message.chat.id;
+
+  if (String(adminChatId) !== String(ADMIN_CHAT_ID)) {
+    await answerCallbackQuery(callbackQuery.id, '⛔ Hanya admin yang bisa menolak.');
+    return;
+  }
+
+  const order = await Order.findById(orderId);
+  if (!order || order.status !== 'pending') {
+    await answerCallbackQuery(callbackQuery.id, 'Order tidak ditemukan atau sudah diproses.');
+    return;
+  }
+
+  order.status = 'rejected';
+  await order.save();
+
+  await editMessageText(adminChatId, msgId,
+    `❌ *Order Ditolak*\n\nOrder ID: \`${orderId}\`\nGoogle ID: \`${order.googleId}\``
+  );
+
+  await sendMessage(order.telegramUserId,
+    `❌ *Pembayaran Ditolak*\n\n` +
+    `Maaf, pembayaran kamu tidak dapat diverifikasi.\n` +
+    `Silakan hubungi admin atau ketik /beli untuk mencoba lagi.`
+  );
+
+  await answerCallbackQuery(callbackQuery.id, 'Order ditolak.');
 }
 
 // ─── AKTIVASI PREMIUM ────────────────────────────────────────────
@@ -467,9 +544,9 @@ async function confirmOrderFromApp(orderId) {
   // Notif ke user Telegram
   try {
     await sendMessage(result.order.telegramUserId,
-      `🎉 <b>Premium Aktif!</b>\n\n` +
-      `Paket <b>${result.order.paketNama}</b> sudah diaktifkan!\n` +
-      `Berlaku sampai: <b>${getExpDate(result.order.paketDurasi)}</b>\n\n` +
+      `🎉 *Premium Aktif!*\n\n` +
+      `Paket *${result.order.paketNama}* sudah diaktifkan!\n` +
+      `Berlaku sampai: *${getExpDate(result.order.paketDurasi)}*\n\n` +
       `Selamat menikmati akses tanpa batas! 📚✨`
     );
   } catch (e) {
@@ -490,7 +567,7 @@ async function rejectOrderFromApp(orderId) {
     await order.save();
 
     await sendMessage(order.telegramUserId,
-      `❌ <b>Pembayaran Ditolak</b>\n\n` +
+      `❌ *Pembayaran Ditolak*\n\n` +
       `Maaf, pembayaran tidak dapat diverifikasi.\n` +
       `Ketik /beli untuk mencoba lagi atau hubungi admin.`
     );
