@@ -18,23 +18,8 @@ app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 app.use(express.static('public'));
 
-// ── TELEGRAM WEBHOOK ENDPOINT ─────────────────────────────────────
-// Harus didaftarkan SEBELUM middleware DB agar Telegram tidak timeout
-const { handleUpdate } = require('./bot/telegram');
-app.post('/api/telegram/webhook', async (req, res) => {
-  // Langsung reply 200 ke Telegram agar tidak retry
-  res.sendStatus(200);
-  // Proses update secara async
-  try {
-    await handleUpdate(req.body);
-  } catch (err) {
-    console.error('[Webhook] Error:', err.message);
-  }
-});
-
-app.use('/api', apiRoutes);
-
 // ── DATABASE CONNECTION (lazy + cached untuk Vercel) ──────────────
+// PENTING: Posisikan middleware DB di sini, SEBELUM semua routing!
 let isConnected = false;
 
 async function connectDB() {
@@ -55,6 +40,23 @@ app.use(async (req, res, next) => {
     res.status(503).json({ success: false, message: 'Database tidak tersedia.' });
   }
 });
+
+// ── TELEGRAM WEBHOOK ENDPOINT ─────────────────────────────────────
+const { handleUpdate } = require('./bot/telegram');
+app.post('/api/telegram/webhook', async (req, res) => {
+  // Langsung reply 200 ke Telegram agar tidak retry
+  res.sendStatus(200);
+  // Proses update secara async
+  try {
+    await handleUpdate(req.body);
+  } catch (err) {
+    console.error('[Webhook] Error:', err.message);
+  }
+});
+
+// ── ROUTES ────────────────────────────────────────────────────────
+// Mount apiRoutes SETELAH middleware koneksi DB dipanggil
+app.use('/api', apiRoutes);
 
 // ── LOCAL DEV: jalankan server biasa ─────────────────────────────
 if (!process.env.VERCEL) {
