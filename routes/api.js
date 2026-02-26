@@ -9,23 +9,27 @@ const mongoose = require('mongoose');
 // HELPER FUNCTIONS
 // ==========================================
 
+// Standard Response Format
 const successResponse = (res, data, pagination = null) => {
-    res.json({ success: true, data, pagination });
-};
-
-const errorResponse = (res, message, code = 500) => {
-    console.error(`[Error] ${message}`);
-    res.status(code).json({ success: false, message });
+    res.json({
+        success: true,
+        data,
+        pagination
+    });
 };
 
 const settingsSchema = new mongoose.Schema({
     key: { type: String, unique: true },
     value: String
 });
-// Cek jika model sudah ada untuk menghindari OverwriteModelError
-const Settings = mongoose.models.Settings || mongoose.model('Settings', settingsSchema);
+const Settings = mongoose.model('Settings', settingsSchema);
 
-// Helper: Pagination
+const errorResponse = (res, message, code = 500) => {
+    console.error(`[Error] ${message}`); // Log error ke console server untuk debugging
+    res.status(code).json({ success: false, message });
+};
+
+// Helper: Kalkulasi Pagination
 const getPaginationParams = (req, defaultLimit = 24) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.max(1, parseInt(req.query.limit) || defaultLimit);
@@ -33,440 +37,882 @@ const getPaginationParams = (req, defaultLimit = 24) => {
     return { page, limit, skip };
 };
 
-// Helper: Attach Chapter Counts
+// Helper: Optimized Chapter Count (Mencegah N+1 Query Problem)
 async function attachChapterCounts(mangas) {
     if (!mangas || mangas.length === 0) return [];
+
+    // 1. Ambil semua ID manga dari list
     const mangaIds = mangas.map(m => m._id);
+
+    // 2. Lakukan 1 kali query Aggregate ke collection Chapter
     const counts = await Chapter.aggregate([
         { $match: { manga_id: { $in: mangaIds } } },
         { $group: { _id: "$manga_id", count: { $sum: 1 } } }
     ]);
+
+    // 3. Buat Map untuk akses cepat (Dictionary)
     const countMap = {};
-    counts.forEach(c => { countMap[c._id.toString()] = c.count; });
-    return mangas.map(m => ({ ...m, chapter_count: countMap[m._id.toString()] || 0 }));
+    counts.forEach(c => {
+        countMap[c._id.toString()] = c.count;
+    });
+
+    // 4. Gabungkan data
+    // Kita asumsikan input 'mangas' sudah berupa Plain Object (karena pakai .lean())
+    return mangas.map(m => ({
+        ...m,
+        chapter_count: countMap[m._id.toString()] || 0
+    }));
 }
-
-// ==========================================
-// MIDDLEWARE: IS ADMIN (DIPERBAIKI)
-// ==========================================
-const isAdmin = async (req, res, next) => {
-    // 1. Ambil dari Body (aman: cek jika req.body ada dulu)
-    const bodyAdminId = (req.body && req.body.adminId) ? req.body.adminId : null;
-
-    // 2. Ambil dari Header (Flutter mengirim via header)
-    const headerAdminId = req.headers['adminid'];
-
-    // 3. Gabungkan logika
-    const adminId = bodyAdminId || headerAdminId;
-
-    // 4. Daftar UID Admin yang valid
-    const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13'];
-
-    if (!adminId || !ADMIN_UIDS.includes(adminId)) {
-        return errorResponse(res, 'Akses ditolak. Hanya untuk Admin.', 403);
-    }
-    next();
-};
 
 // ==========================================
 // 1. HOME & LISTING ENDPOINTS
 // ==========================================
 
+// GET /api/home 
 router.get('/home', async (req, res) => {
     try {
         const { page, limit, skip } = getPaginationParams(req);
+
+        // Jalankan Query Count Total terpisah agar tidak blocking
         const totalMangaPromise = Manga.countDocuments();
 
+        // Query 1: Recents (UPDATED: Gunakan updatedAt agar chapter baru naik ke atas)
         const recentsPromise = Manga.find()
-            .select('title slug thumb metadata createdAt updatedAt')
-            .sort({ updatedAt: -1 })
-            .skip(skip).limit(limit).lean();
+            // Tambahkan 'updatedAt' agar bisa dicek frontend
+            .select('title slug thumb metadata createdAt updatedAt') 
+            // GANTI: Sort berdasarkan waktu update terakhir (Chapter baru = Atas)
+            .sort({ updatedAt: -1 }) 
+            .skip(skip)
+            .limit(limit)
+            .lean(); 
 
+        // Query 2: Trending (Top Views) - Tetap sort by views
         const trendingPromise = Manga.find()
             .select('title slug thumb views metadata')
-            .sort({ views: -1 }).limit(10).lean();
+            .sort({ views: -1 })
+            .limit(10)
+            .lean();
 
+        // Query 3: Manhwa (UPDATED: Sort by updatedAt juga)
         const manhwasPromise = Manga.find({ 'metadata.type': { $regex: 'manhwa', $options: 'i' } })
             .select('title slug thumb metadata updatedAt')
-            .sort({ updatedAt: -1 }).limit(10).lean();
+            // GANTI: Manhwa yang update chapter baru naik ke atas
+            .sort({ updatedAt: -1 }) 
+            .limit(10)
+            .lean();
 
+        // EKSEKUSI PARALEL (Kecepatan meningkat drastis)
         const [totalManga, recentsRaw, trendingRaw, manhwasRaw] = await Promise.all([
-            totalMangaPromise, recentsPromise, trendingPromise, manhwasPromise
+            totalMangaPromise,
+            recentsPromise,
+            trendingPromise,
+            manhwasPromise
         ]);
 
+        // Attach chapter counts secara paralel juga
         const [recents, trending, manhwas] = await Promise.all([
             attachChapterCounts(recentsRaw),
             attachChapterCounts(trendingRaw),
             attachChapterCounts(manhwasRaw)
         ]);
 
-        successResponse(res, { recents, trending, manhwas }, {
+        successResponse(res, { 
+            recents, 
+            trending,
+            manhwas 
+        }, {
             currentPage: page,
             totalPages: Math.ceil(totalManga / limit),
             totalItems: totalManga,
             perPage: limit
         });
-    } catch (err) { errorResponse(res, err.message); }
+
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// GET /api/manga-list
 router.get('/manga-list', async (req, res) => {
     try {
         const { page, limit, skip } = getPaginationParams(req);
+
         const [total, mangasRaw] = await Promise.all([
             Manga.countDocuments(),
-            Manga.find().select('title slug thumb metadata.rating metadata.status metadata.type')
-                .sort({ title: 1 }).skip(skip).limit(limit).lean()
+            Manga.find()
+                .select('title slug thumb metadata.rating metadata.status metadata.type')
+                .sort({ title: 1 }) // A-Z
+                .skip(skip)
+                .limit(limit)
+                .lean()
         ]);
+        
         const mangas = await attachChapterCounts(mangasRaw);
+
         successResponse(res, mangas, {
-            currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, perPage: limit
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            totalItems: total,
+            perPage: limit
         });
-    } catch (err) { errorResponse(res, err.message); }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
 // ==========================================
 // 2. DETAIL & READ ENDPOINTS
 // ==========================================
 
+// GET /api/manga/:slug
 router.get('/manga/:slug', async (req, res) => {
     try {
+        // Cari dan update view sekalian ambil datanya
         const manga = await Manga.findOneAndUpdate(
-            { slug: req.params.slug }, { $inc: { views: 1 } }, { new: true, timestamps: false }
+            { slug: req.params.slug },
+            { $inc: { views: 1 } },
+            { new: true, timestamps: false }
         ).lean();
+
         if (!manga) return errorResponse(res, 'Manga not found', 404);
 
         const chapters = await Chapter.find({ manga_id: manga._id })
             .select('title slug chapter_index createdAt')
-            .sort({ chapter_index: -1 })
-            .collation({ locale: "en_US", numericOrdering: true }).lean();
+            // Gunakan -1 untuk Descending (Chapter Terbesar/Terbaru paling atas)
+            .sort({ chapter_index: -1 }) 
+            // PENTING: Tambahkan collation agar sorting angka akurat
+            .collation({ locale: "en_US", numericOrdering: true })
+            .lean();
 
+        // Gabungkan manual karena sudah .lean()
         manga.chapter_count = chapters.length;
+
         successResponse(res, { info: manga, chapters });
-    } catch (err) { errorResponse(res, err.message); }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+
+// GET /api/read/:slug/:chapterSlug
 router.get('/read/:slug/:chapterSlug', async (req, res) => {
     try {
-        const manga = await Manga.findOne({ slug: req.params.slug }).select('_id title slug thumb').lean();
+        const manga = await Manga.findOne({ slug: req.params.slug })
+            .select('_id title slug thumb')
+            .lean();
+            
         if (!manga) return errorResponse(res, 'Manga not found', 404);
 
-        const chapter = await Chapter.findOne({ manga_id: manga._id, slug: req.params.chapterSlug }).lean();
-        if (!chapter) return errorResponse(res, 'Chapter not found', 404);
+        const chapter = await Chapter.findOne({ 
+            manga_id: manga._id, 
+            slug: req.params.chapterSlug 
+        }).lean();
 
+        if (!chapter) return errorResponse(res, 'Chapter not found', 404);
         const [nextChap, prevChap] = await Promise.all([
-            Chapter.findOne({ manga_id: manga._id, chapter_index: { $gt: chapter.chapter_index } })
-                .sort({ chapter_index: 1 }).select('slug title').collation({ locale: "en_US", numericOrdering: true }).lean(),
-            Chapter.findOne({ manga_id: manga._id, chapter_index: { $lt: chapter.chapter_index } })
-                .sort({ chapter_index: -1 }).select('slug title').collation({ locale: "en_US", numericOrdering: true }).lean()
+            Chapter.findOne({ 
+                manga_id: manga._id, 
+                chapter_index: { $gt: chapter.chapter_index } 
+            })
+            .sort({ chapter_index: 1 })
+            .select('slug title')
+            .collation({ locale: "en_US", numericOrdering: true }) 
+            .lean(),
+            Chapter.findOne({ 
+                manga_id: manga._id, 
+                chapter_index: { $lt: chapter.chapter_index } 
+            })
+            .sort({ chapter_index: -1 })
+            .select('slug title')
+            .collation({ locale: "en_US", numericOrdering: true })
+            .lean()
         ]);
-        successResponse(res, { chapter, manga, navigation: { next: nextChap ? nextChap.slug : null, prev: prevChap ? prevChap.slug : null } });
-    } catch (err) { errorResponse(res, err.message); }
+        successResponse(res, { 
+            chapter, 
+            manga, 
+            navigation: {
+                next: nextChap ? nextChap.slug : null,
+                prev: prevChap ? prevChap.slug : null
+            }
+        });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
+
 
 // ==========================================
 // 3. SEARCH & FILTERS
 // ==========================================
 
+// GET /api/search?q=keyword
 router.get('/search', async (req, res) => {
     try {
         const keyword = req.query.q;
         if (!keyword) return errorResponse(res, 'Query parameter "q" required', 400);
+
         const { page, limit, skip } = getPaginationParams(req);
         const query = { title: { $regex: keyword, $options: 'i' } };
+
         const [total, mangasRaw] = await Promise.all([
             Manga.countDocuments(query),
-            Manga.find(query).select('title slug thumb metadata').skip(skip).limit(limit).lean()
+            Manga.find(query)
+                .select('title slug thumb metadata')
+                .skip(skip)
+                .limit(limit)
+                .lean()
         ]);
+
         const mangas = await attachChapterCounts(mangasRaw);
-        successResponse(res, mangas, { currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, perPage: limit });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, mangas, {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            totalItems: total,
+            perPage: limit
+        });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// GET /api/genres
 router.get('/genres', async (req, res) => {
     try {
+        // Ambil genre unik dari semua manga
         const genres = await Manga.aggregate([
-            { $unwind: "$tags" }, { $match: { tags: { $ne: "" } } },
-            { $group: { _id: "$tags", count: { $sum: 1 } } }, { $sort: { _id: 1 } }
+            { $unwind: "$tags" }, // Pecah array tags menjadi dokumen terpisah
+            // Filter tags kosong jika ada
+            { $match: { tags: { $ne: "" } } }, 
+            { $group: { _id: "$tags", count: { $sum: 1 } } },
+            { $sort: { _id: 1 } }
         ]);
-        successResponse(res, genres.map(g => ({ name: g._id, count: g.count })));
-    } catch (err) { errorResponse(res, err.message); }
+        
+        // Format output agar lebih bersih: [{name: "Action", count: 10}, ...]
+        const formattedGenres = genres.map(g => ({ name: g._id, count: g.count }));
+        
+        successResponse(res, formattedGenres);
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// GET /api/filter/:type/:value
 router.get('/filter/:type/:value', async (req, res) => {
     try {
         const { type, value } = req.params;
         const { page, limit, skip } = getPaginationParams(req);
+
         let query = {};
+
         if (type === 'genre') {
-            const cleanValue = value.replace(/-/g, '[\\s\\-]');
+            const cleanValue = value.replace(/-/g, '[\\s\\-]'); 
             query = { tags: { $regex: new RegExp(cleanValue, 'i') } };
-        } else if (type === 'status') query = { 'metadata.status': { $regex: `^${value}$`, $options: 'i' } };
-        else if (type === 'type') query = { 'metadata.type': { $regex: `^${value}$`, $options: 'i' } };
-        else return errorResponse(res, 'Invalid filter', 400);
+        } else if (type === 'status') {
+            query = { 'metadata.status': { $regex: `^${value}$`, $options: 'i' } };
+        } else if (type === 'type') {
+            query = { 'metadata.type': { $regex: `^${value}$`, $options: 'i' } };
+        } else {
+            return errorResponse(res, 'Invalid filter type. Use: genre, status, or type.', 400);
+        }
 
         const [total, mangasRaw] = await Promise.all([
             Manga.countDocuments(query),
-            Manga.find(query).sort({ updatedAt: -1 }).select('title slug thumb metadata updatedAt').skip(skip).limit(limit).lean()
+            Manga.find(query)
+                .sort({ updatedAt: -1 })
+                .select('title slug thumb metadata updatedAt')
+                .skip(skip)
+                .limit(limit)
+                .lean()
         ]);
+
         const mangas = await attachChapterCounts(mangasRaw);
-        successResponse(res, mangas, { currentPage: page, totalPages: Math.ceil(total / limit), totalItems: total, filter: { type, value }, perPage: limit });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, mangas, {
+            currentPage: page,
+            totalPages: Math.ceil(total / limit),
+            totalItems: total,
+            filter: { type, value },
+            perPage: limit
+        });
+
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
-// ==========================================
-// 4. USER ENDPOINTS
-// ==========================================
-
+// POST /api/users/sync
+// Mendapatkan data user, mengecek masa aktif premium, dan reset limit harian
+// POST /api/users/sync
 router.post('/users/sync', async (req, res) => {
     try {
         const { googleId, email, displayName } = req.body;
         if (!googleId) return errorResponse(res, 'googleId is required', 400);
-        const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13'];
-        const isUserAdmin = ADMIN_UIDS.includes(googleId);
-        let user = await User.findOne({ googleId });
-        const today = new Date().toISOString().split('T')[0];
 
+        // ==========================================
+        // LOGIKA ADMIN: Taruh UID kamu di dalam array ini
+        // ==========================================
+        const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13']; 
+        const isUserAdmin = ADMIN_UIDS.includes(googleId);
+
+        let user = await User.findOne({ googleId });
+        const today = new Date().toISOString().split('T')[0]; // Mendapatkan tanggal hari ini (YYYY-MM-DD)
+        
+        // 1. JIKA USER BARU
         if (!user) {
-            user = new User({
-                googleId, email, displayName, isAdmin: isUserAdmin, isPremium: isUserAdmin, dailyDownloads: { date: today, count: 0 }
+            user = new User({ 
+                googleId, 
+                email, 
+                displayName,
+                isAdmin: isUserAdmin,   // <--- Otomatis jadi admin jika UID cocok
+                isPremium: isUserAdmin, // <--- Admin otomatis dapet akses Premium
+                dailyDownloads: { date: today, count: 0 } 
             });
         } else {
+            // 2. JIKA USER LAMA
             user.isAdmin = isUserAdmin;
-            if (isUserAdmin) user.isPremium = true;
-            else if (user.isPremium && user.premiumUntil) {
-                if (new Date() > user.premiumUntil) { user.isPremium = false; user.premiumUntil = null; }
+            if (isUserAdmin) {
+                user.isPremium = true;
+            } else if (user.isPremium && user.premiumUntil) {
+                if (new Date() > user.premiumUntil) {
+                    user.isPremium = false;
+                    user.premiumUntil = null;
+                }
             }
-            if (!user.dailyDownloads || user.dailyDownloads.date !== today) {
+
+            // Logika Reset Limit Download
+            if (!user.dailyDownloads) {
                 user.dailyDownloads = { date: today, count: 0 };
+            } else if (user.dailyDownloads.date !== today) {
+                user.dailyDownloads.date = today;
+                user.dailyDownloads.count = 0;
             }
         }
+
         await user.save();
         successResponse(res, user);
-    } catch (err) { errorResponse(res, err.message); }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// POST /api/users/:googleId/library
+// Menambah atau memperbarui manga di Library
 router.post('/users/:googleId/library', async (req, res) => {
     try {
-        const { googleId } = req.params; const { slug, mangaData } = req.body;
+        const { googleId } = req.params;
+        const { slug, mangaData } = req.body;
+
+        if (!slug) return errorResponse(res, 'slug is required', 400);
+
         const user = await User.findOne({ googleId });
         if (!user) return errorResponse(res, 'User not found', 404);
-        const idx = user.library.findIndex(item => item.slug === slug);
-        if (idx >= 0) { user.library[idx].mangaData = mangaData; user.library[idx].addedAt = Date.now(); }
-        else user.library.push({ slug, mangaData });
+
+        // Cek apakah manga sudah ada di library
+        const existingIndex = user.library.findIndex(item => item.slug === slug);
+
+        if (existingIndex >= 0) {
+            // Jika sudah ada, perbarui data manga dan waktu ditambahkan
+            user.library[existingIndex].mangaData = mangaData;
+            user.library[existingIndex].addedAt = Date.now();
+        } else {
+            // Jika belum ada, masukkan ke dalam array library
+            user.library.push({ slug, mangaData });
+        }
+
         await user.save();
         successResponse(res, user.library);
-    } catch (err) { errorResponse(res, err.message); }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// POST /api/users/:googleId/history
+// Mencatat atau memperbarui riwayat bacaan
 router.post('/users/:googleId/history', async (req, res) => {
     try {
         const { googleId } = req.params;
         const { type, slug, title, thumb, lastChapterTitle, lastChapterSlug } = req.body;
+
+        if (!slug) return errorResponse(res, 'slug is required', 400);
+
         const user = await User.findOne({ googleId });
         if (!user) return errorResponse(res, 'User not found', 404);
-        const idx = user.history.findIndex(item => item.slug === slug);
-        if (idx >= 0) {
-            user.history[idx].lastChapterTitle = lastChapterTitle;
-            user.history[idx].lastChapterSlug = lastChapterSlug;
-            user.history[idx].lastRead = Date.now();
+
+        // Cek apakah manga ini sudah ada di history sebelumnya
+        const existingIndex = user.history.findIndex(item => item.slug === slug);
+
+        if (existingIndex >= 0) {
+            // Jika sudah ada, cukup update chapter terakhir dan waktu bacanya
+            user.history[existingIndex].lastChapterTitle = lastChapterTitle;
+            user.history[existingIndex].lastChapterSlug = lastChapterSlug;
+            user.history[existingIndex].lastRead = Date.now();
+            // Update detail lain jika disediakan
+            if (title) user.history[existingIndex].title = title;
+            if (thumb) user.history[existingIndex].thumb = thumb;
         } else {
-            user.history.push({ type, slug, title, thumb, lastChapterTitle, lastChapterSlug });
+            // Jika belum ada, tambahkan history baru
+            user.history.push({
+                type, slug, title, thumb, lastChapterTitle, lastChapterSlug
+            });
         }
+
         await user.save();
         successResponse(res, user.history);
-    } catch (err) { errorResponse(res, err.message); }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// ==========================================
+// 5. USER DELETE ENDPOINTS
+// ==========================================
+
+// DELETE /api/users/:googleId/library/:slug
+// Menghapus satu manga secara spesifik dari Library
 router.delete('/users/:googleId/library/:slug', async (req, res) => {
     try {
-        const user = await User.findOne({ googleId: req.params.googleId });
+        const { googleId, slug } = req.params;
+        const user = await User.findOne({ googleId });
+        
         if (!user) return errorResponse(res, 'User not found', 404);
-        user.library = user.library.filter(item => item.slug !== req.params.slug);
+
+        // Hapus manga dengan slug yang cocok dari array library
+        user.library = user.library.filter(item => item.slug !== slug);
         await user.save();
-        successResponse(res, { message: 'Deleted' });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, { message: 'Manga berhasil dihapus dari library' });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// DELETE /api/users/:googleId/library
+// Menghapus SEMUA manga dari Library (Clear Library)
 router.delete('/users/:googleId/library', async (req, res) => {
     try {
-        const user = await User.findOne({ googleId: req.params.googleId });
+        const { googleId } = req.params;
+        const user = await User.findOne({ googleId });
+        
         if (!user) return errorResponse(res, 'User not found', 404);
+
+        // Kosongkan array library
         user.library = [];
         await user.save();
-        successResponse(res, { message: 'Cleared' });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, { message: 'Library berhasil dikosongkan' });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// DELETE /api/users/:googleId/history/:slug
+// Menghapus satu riwayat bacaan secara spesifik
 router.delete('/users/:googleId/history/:slug', async (req, res) => {
     try {
-        const user = await User.findOne({ googleId: req.params.googleId });
+        const { googleId, slug } = req.params;
+        const user = await User.findOne({ googleId });
+        
         if (!user) return errorResponse(res, 'User not found', 404);
-        user.history = user.history.filter(item => item.slug !== req.params.slug);
+
+        // Hapus history dengan slug yang cocok
+        user.history = user.history.filter(item => item.slug !== slug);
         await user.save();
-        successResponse(res, { message: 'Deleted' });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, { message: 'Riwayat bacaan berhasil dihapus' });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// DELETE /api/users/:googleId/history
+// Menghapus SEMUA riwayat bacaan, bisa difilter berdasarkan tipe (?type=manga)
 router.delete('/users/:googleId/history', async (req, res) => {
     try {
-        const user = await User.findOne({ googleId: req.params.googleId });
+        const { googleId } = req.params;
+        const { type } = req.query; // Ambil tipe dari query parameter
+        const user = await User.findOne({ googleId });
+        
         if (!user) return errorResponse(res, 'User not found', 404);
-        if (req.query.type) user.history = user.history.filter(item => item.type !== req.query.type);
-        else user.history = [];
+
+        if (type) {
+            // Jika ada tipe spesifik (misal hanya mau hapus history 'manga'), 
+            // simpan yang tipenya TIDAK SAMA dengan yang mau dihapus
+            user.history = user.history.filter(item => item.type !== type);
+        } else {
+            // Jika tidak ada tipe, kosongkan semua history
+            user.history = [];
+        }
+        
         await user.save();
-        successResponse(res, { message: 'Cleared' });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, { message: 'Riwayat bacaan berhasil dibersihkan' });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// ==========================================
+// 6. DOWNLOAD LIMIT & PREMIUM ENDPOINTS
+// ==========================================
+
+// POST /api/users/:googleId/download
+// Mengecek limit dan menambahkan hitungan download harian
 router.post('/users/:googleId/download', async (req, res) => {
     try {
-        const user = await User.findOne({ googleId: req.params.googleId });
+        const { googleId } = req.params;
+        const user = await User.findOne({ googleId });
         if (!user) return errorResponse(res, 'User not found', 404);
-        if (!user.isAdmin && user.isPremium && user.premiumUntil && new Date() > user.premiumUntil) {
-            user.isPremium = false; user.premiumUntil = null;
+
+        // 1. Cek Kadaluarsa Premium (Khusus untuk user biasa / bukan admin)
+        if (!user.isAdmin && user.isPremium && user.premiumUntil) {
+            // Jika hari ini sudah melewati tanggal premiumUntil, matikan premiumnya
+            if (new Date() > user.premiumUntil) {
+                user.isPremium = false;
+                user.premiumUntil = null;
+            }
         }
-        if (user.isPremium || user.isAdmin) {
-            await user.save(); return successResponse(res, { allowed: true, isPremium: true });
+
+        // Jika user masih Premium ATAU Admin, langsung loloskan tanpa limit
+        if (user.isPremium || user.isAdmin) { 
+            await user.save(); // Simpan jika ada perubahan status kadaluarsa
+            return successResponse(res, { allowed: true, isPremium: true });
         }
-        const today = new Date().toISOString().split('T')[0];
+
+        // 2. Logika Limit User Biasa (20x Sehari)
+        const today = new Date().toISOString().split('T')[0]; // Mendapatkan tanggal "YYYY-MM-DD"
         const MAX_LIMIT = 20;
-        if (!user.dailyDownloads) user.dailyDownloads = { date: "", count: 0 };
-        if (user.dailyDownloads.date !== today) { user.dailyDownloads.date = today; user.dailyDownloads.count = 0; }
+
+        // Pastikan object dailyDownloads ada, jika tidak, buat struktur default-nya
+        if (!user.dailyDownloads) {
+            user.dailyDownloads = { date: "", count: 0 };
+        }
+
+        // Jika tanggal di database beda dengan hari ini, reset hitungan jadi 0
+        if (user.dailyDownloads.date !== today) {
+            user.dailyDownloads.date = today;
+            user.dailyDownloads.count = 0;
+        }
+
+        // Jika sudah mencapai batas
         if (user.dailyDownloads.count >= MAX_LIMIT) {
             await user.save();
-            return successResponse(res, { allowed: false, current: user.dailyDownloads.count, max: MAX_LIMIT, message: "Limit Harian Tercapai" });
+            return successResponse(res, { 
+                allowed: false, 
+                current: user.dailyDownloads.count, 
+                max: MAX_LIMIT,
+                message: "Batas unduhan harian (20) tercapai. Tunggu besok atau upgrade Premium!"
+            });
         }
-        user.dailyDownloads.count += 1; user.downloadCount += 1;
+
+        // 3. Tambah hitungan jika belum limit
+        user.dailyDownloads.count += 1;
+        user.downloadCount += 1; // Total seumur hidup
         await user.save();
-        successResponse(res, { allowed: true, current: user.dailyDownloads.count, max: MAX_LIMIT });
-    } catch (err) { errorResponse(res, err.message); }
+
+        successResponse(res, { 
+            allowed: true, 
+            current: user.dailyDownloads.count, 
+            max: MAX_LIMIT 
+        });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
-// Route SET Premium Manual (Tanpa perlu middleware isAdmin di level express, validasi di dalam)
+// POST /api/users/:googleId/set-premium
+// Rute Khusus Admin untuk memberikan Premium (Misal: 7 hari, 30 hari)
 router.post('/users/:googleId/set-premium', async (req, res) => {
     try {
-        // Cek Admin ID di Body
-        const { adminId, days } = req.body;
-        const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13'];
-        if (!adminId || !ADMIN_UIDS.includes(adminId)) return errorResponse(res, 'Forbidden', 403);
+        const { googleId } = req.params;
+        const { days } = req.body; // Jumlah hari premium dari Flutter
 
-        const user = await User.findOne({ googleId: req.params.googleId });
+        if (!days) return errorResponse(res, 'Jumlah hari (days) diperlukan', 400);
+
+        const user = await User.findOne({ googleId });
         if (!user) return errorResponse(res, 'User not found', 404);
 
+        // 1. Set Status Premium
         user.isPremium = true;
+        
+        // 2. Hitung tanggal kadaluarsa dari hari ini + jumlah hari (Cukup tulis SATU KALI saja)
         const expDate = new Date();
         expDate.setDate(expDate.getDate() + parseInt(days));
         user.premiumUntil = expDate;
 
+        // 3. Tambahkan Notifikasi ke User
         if (!user.notifications) user.notifications = [];
         user.notifications.push({
             title: "Premium Diaktifkan! 🎉",
-            message: `Admin telah mengaktifkan status Premium kamu selama ${days} hari.`,
+            message: `Admin telah mengaktifkan status Premium kamu selama ${days} hari. Nikmati fitur unduhan tanpa batas!`,
+            isRead: false,
+            createdAt: new Date() // <-- PENTING: Tambahkan timestamp untuk sorting
+        });
+
+        // 4. Simpan ke Database
+        await user.save();
+        
+        successResponse(res, { 
+            message: `Premium berhasil diaktifkan selama ${days} hari`, 
+            premiumUntil: user.premiumUntil 
+        });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
+});
+
+// ==========================================
+// 8. ADMIN ENDPOINTS
+// ==========================================
+
+// Middleware untuk memverifikasi apakah user adalah admin
+const isAdmin = async (req, res, next) => {
+    // Ambil adminId dari body request untuk verifikasi
+    const { adminId } = req.body;
+    const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13']; // Pastikan UID admin Anda ada di sini
+
+    if (!adminId || !ADMIN_UIDS.includes(adminId)) {
+        return errorResponse(res, 'Akses ditolak. Hanya untuk Admin.', 403);
+    }
+    // Jika lolos, lanjutkan ke fungsi selanjutnya
+    next();
+};
+
+// POST /api/admin/broadcast
+// Mengirim notifikasi ke semua user
+router.post('/admin/broadcast', isAdmin, async (req, res) => {
+    try {
+        const { title, message } = req.body;
+
+        if (!title || !message) {
+            return errorResponse(res, 'Judul dan pesan tidak boleh kosong', 400);
+        }
+
+        const newNotification = {
+            title,
+            message,
             isRead: false,
             createdAt: new Date()
+        };
+
+        // Menggunakan updateMany untuk menambahkan notifikasi ke SEMUA user
+        const result = await User.updateMany(
+            {}, // Filter kosong berarti memilih semua dokumen (user)
+            { $push: { notifications: newNotification } }
+        );
+
+        successResponse(res, {
+            message: `Notifikasi berhasil dikirim ke ${result.modifiedCount} user.`
         });
-        await user.save();
-        successResponse(res, { message: 'Premium Set', premiumUntil: user.premiumUntil });
-    } catch (err) { errorResponse(res, err.message); }
+
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// ==========================================
+// 7. NOTIFICATION ENDPOINTS
+// ==========================================
+
+// GET /api/users/:googleId/notifications
+// Mengambil semua notifikasi untuk seorang user
 router.get('/users/:googleId/notifications', async (req, res) => {
     try {
-        const user = await User.findOne({ googleId: req.params.googleId }).select('notifications').lean();
+        const { googleId } = req.params;
+        // Ambil hanya field notifikasi untuk efisiensi
+        const user = await User.findOne({ googleId }).select('notifications').lean();
+        
         if (!user) return errorResponse(res, 'User not found', 404);
-        const sorted = (user.notifications || []).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        successResponse(res, sorted);
-    } catch (err) { errorResponse(res, err.message); }
+
+        // Urutkan notifikasi dari yang terbaru ke terlama sebelum mengirim
+        const sortedNotifications = (user.notifications || []).sort((a, b) => 
+            new Date(b.createdAt) - new Date(a.createdAt)
+        );
+
+        successResponse(res, sortedNotifications);
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
+// PUT /api/users/:googleId/notifications/read
+// Menandai semua notifikasi sebagai sudah dibaca
 router.put('/users/:googleId/notifications/read', async (req, res) => {
     try {
-        await User.updateOne({ googleId: req.params.googleId }, { $set: { "notifications.$[].isRead": true } });
-        successResponse(res, { message: 'Read all' });
-    } catch (err) { errorResponse(res, err.message); }
+        const { googleId } = req.params;
+        // Update semua item dalam array notifikasi, set isRead menjadi true
+        await User.updateOne({ googleId }, { $set: { "notifications.$[].isRead": true } });
+        successResponse(res, { message: 'All notifications marked as read' });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
-// ==========================================
-// 5. SETTINGS
-// ==========================================
+// GET: Mengambil Nomor WhatsApp Admin
+router.get('/settings/whatsapp', async (req, res) => {
+    try {
+        let setting = await Settings.findOne({ key: 'whatsapp' });
+        // Jika belum ada di database, kembalikan nomor default
+        res.json({ success: true, whatsapp: setting ? setting.value : '6281234567890' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 
+// POST: Mengubah Nomor WhatsApp Admin
+router.post('/settings/whatsapp', async (req, res) => {
+    try {
+        const { whatsapp } = req.body;
+        let setting = await Settings.findOne({ key: 'whatsapp' });
+        
+        if (!setting) {
+            setting = new Settings({ key: 'whatsapp', value: whatsapp });
+        } else {
+            setting.value = whatsapp;
+        }
+        
+        await setting.save();
+        res.json({ success: true, whatsapp: setting.value });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
+// GET /api/settings/telegram — Ambil username Telegram bot
 router.get('/settings/telegram', async (req, res) => {
     try {
         let setting = await Settings.findOne({ key: 'telegram_bot' });
         res.json({ success: true, telegram: setting ? setting.value : '' });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
 });
 
+// POST /api/settings/telegram — Simpan username Telegram bot
 router.post('/settings/telegram', async (req, res) => {
     try {
         const { telegram } = req.body;
-        await Settings.findOneAndUpdate({ key: 'telegram_bot' }, { value: telegram }, { upsert: true });
-        res.json({ success: true, telegram });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+        let setting = await Settings.findOne({ key: 'telegram_bot' });
+        if (!setting) {
+            setting = new Settings({ key: 'telegram_bot', value: telegram });
+        } else {
+            setting.value = telegram;
+        }
+        await setting.save();
+        res.json({ success: true, telegram: setting.value });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
 });
 
+
+// GET /api/telegram/status — Debug: cek status webhook & env vars
 router.get('/telegram/status', async (req, res) => {
     try {
         const axios = require('axios');
         const token = process.env.TELEGRAM_BOT_TOKEN;
-        const webhookRes = await axios.get(`https://api.telegram.org/bot${token}/getWebhookInfo`);
-        res.json({ success: true, webhook: webhookRes.data.result });
-    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+        const adminChatId = process.env.TELEGRAM_ADMIN_CHAT_ID;
+        const siteUrl = process.env.SITE_URL;
+
+        if (!token) {
+            return res.json({ success: false, message: 'TELEGRAM_BOT_TOKEN tidak diset!' });
+        }
+
+        // Cek webhook info ke Telegram
+        const webhookRes = await axios.get(
+            `https://api.telegram.org/bot${token}/getWebhookInfo`
+        );
+        const webhookInfo = webhookRes.data.result;
+
+        // Cek bot info
+        const meRes = await axios.get(
+            `https://api.telegram.org/bot${token}/getMe`
+        );
+        const botInfo = meRes.data.result;
+
+        res.json({
+            success: true,
+            bot: {
+                username: botInfo.username,
+                name: botInfo.first_name,
+                id: botInfo.id,
+            },
+            webhook: {
+                url: webhookInfo.url || '(belum diset)',
+                hasPendingUpdates: webhookInfo.pending_update_count,
+                lastError: webhookInfo.last_error_message || null,
+                lastErrorDate: webhookInfo.last_error_date
+                    ? new Date(webhookInfo.last_error_date * 1000).toISOString()
+                    : null,
+            },
+            env: {
+                TELEGRAM_BOT_TOKEN: '✅ diset',
+                TELEGRAM_ADMIN_CHAT_ID: adminChatId ? `✅ ${adminChatId}` : '❌ belum diset',
+                SITE_URL: siteUrl || '❌ belum diset',
+                expectedWebhook: siteUrl ? `${siteUrl}/api/telegram/webhook` : '(SITE_URL belum diset)',
+            },
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.response?.data?.description || err.message });
+    }
 });
 
-// ==========================================
-// 6. ADMIN & BOT INTEGRATION (Lazy Load)
-// ==========================================
+module.exports = router;
 
-// Setup Webhook
-router.post('/telegram/setup-webhook', isAdmin, async (req, res) => {
-    try {
-        const { setupWebhook } = require('../bot/telegram');
-        const webhookUrl = `${process.env.SITE_URL}/api/telegram/webhook`;
-        await setupWebhook(webhookUrl);
-        successResponse(res, { message: `Webhook set: ${webhookUrl}` });
-    } catch (err) { errorResponse(res, err.message); }
-});
+// Tidak langsung require di atas agar tidak circular jika bot belum init
+// Gunakan lazy require di dalam fungsi
 
-// Admin Broadcast
-router.post('/admin/broadcast', isAdmin, async (req, res) => {
-    try {
-        const { title, message } = req.body;
-        await User.updateMany({}, { $push: { notifications: { title, message, isRead: false, createdAt: new Date() } } });
-        successResponse(res, { message: 'Broadcast Sent' });
-    } catch (err) { errorResponse(res, err.message); }
-});
-
-// Admin Orders GET
+// GET /api/admin/orders — Ambil semua pending Telegram orders (dari MongoDB)
 router.get('/admin/orders', isAdmin, async (req, res) => {
     try {
         const { getPendingOrders } = require('../bot/telegram');
         const orders = await getPendingOrders();
         successResponse(res, orders);
-    } catch (err) { errorResponse(res, err.message); }
+    } catch (err) {
+        errorResponse(res, err.message, 503);
+    }
 });
 
-// Admin Orders Confirm
+// POST /api/admin/orders/:orderKey/confirm — Konfirmasi & aktifkan premium
 router.post('/admin/orders/:orderKey/confirm', isAdmin, async (req, res) => {
     try {
         const { confirmOrderFromApp } = require('../bot/telegram');
         const result = await confirmOrderFromApp(req.params.orderKey);
-        if (result.success) successResponse(res, { message: 'Confirmed' });
-        else errorResponse(res, result.message, 400);
-    } catch (err) { errorResponse(res, err.message); }
+        if (result.success) {
+            successResponse(res, { message: 'Premium berhasil diaktifkan.' });
+        } else {
+            errorResponse(res, result.message, 400);
+        }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
-// Admin Orders Reject
+// DELETE /api/admin/orders/:orderKey — Tolak order
 router.delete('/admin/orders/:orderKey', isAdmin, async (req, res) => {
     try {
         const { rejectOrderFromApp } = require('../bot/telegram');
         const result = await rejectOrderFromApp(req.params.orderKey);
-        if (result.success) successResponse(res, { message: result.message });
-        else errorResponse(res, result.message, 400);
-    } catch (err) { errorResponse(res, err.message); }
+        if (result.success) {
+            successResponse(res, { message: result.message });
+        } else {
+            errorResponse(res, result.message, 400);
+        }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
 });
 
-// ==========================================
-// EXPORT ROUTER (HARUS PALING BAWAH)
-// ==========================================
-module.exports = router;
+// POST /api/telegram/setup-webhook — Setup webhook URL Telegram (panggil sekali)
+router.post('/telegram/setup-webhook', isAdmin, async (req, res) => {
+    try {
+        const { setupWebhook } = require('../bot/telegram');
+        const webhookUrl = `${process.env.SITE_URL}/api/telegram/webhook`;
+        await setupWebhook(webhookUrl);
+        successResponse(res, { message: `Webhook terdaftar ke: ${webhookUrl}` });
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
+});
+
