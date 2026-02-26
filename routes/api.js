@@ -46,11 +46,21 @@ async function attachChapterCounts(mangas) {
     return mangas.map(m => ({ ...m, chapter_count: countMap[m._id.toString()] || 0 }));
 }
 
-// Middleware: Is Admin
-// DIPERBAIKI: Cek Headers juga (karena GET request dari Flutter pakai header)
+// ==========================================
+// MIDDLEWARE: IS ADMIN (DIPERBAIKI)
+// ==========================================
 const isAdmin = async (req, res, next) => {
-    const adminId = req.body.adminId || req.headers['adminid']; // Cek Body & Header
-    const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13']; // Pastikan UID ini BENAR
+    // 1. Ambil dari Body (aman: cek jika req.body ada dulu)
+    const bodyAdminId = (req.body && req.body.adminId) ? req.body.adminId : null;
+
+    // 2. Ambil dari Header (Flutter mengirim via header)
+    const headerAdminId = req.headers['adminid'];
+
+    // 3. Gabungkan logika
+    const adminId = bodyAdminId || headerAdminId;
+
+    // 4. Daftar UID Admin yang valid
+    const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13'];
 
     if (!adminId || !ADMIN_UIDS.includes(adminId)) {
         return errorResponse(res, 'Akses ditolak. Hanya untuk Admin.', 403);
