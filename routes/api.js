@@ -79,12 +79,12 @@ router.get('/home', async (req, res) => {
         // Query 1: Recents (UPDATED: Gunakan updatedAt agar chapter baru naik ke atas)
         const recentsPromise = Manga.find()
             // Tambahkan 'updatedAt' agar bisa dicek frontend
-            .select('title slug thumb metadata createdAt updatedAt') 
+            .select('title slug thumb metadata createdAt updatedAt')
             // GANTI: Sort berdasarkan waktu update terakhir (Chapter baru = Atas)
-            .sort({ updatedAt: -1 }) 
+            .sort({ updatedAt: -1 })
             .skip(skip)
             .limit(limit)
-            .lean(); 
+            .lean();
 
         // Query 2: Trending (Top Views) - Tetap sort by views
         const trendingPromise = Manga.find()
@@ -97,7 +97,7 @@ router.get('/home', async (req, res) => {
         const manhwasPromise = Manga.find({ 'metadata.type': { $regex: 'manhwa', $options: 'i' } })
             .select('title slug thumb metadata updatedAt')
             // GANTI: Manhwa yang update chapter baru naik ke atas
-            .sort({ updatedAt: -1 }) 
+            .sort({ updatedAt: -1 })
             .limit(10)
             .lean();
 
@@ -116,10 +116,10 @@ router.get('/home', async (req, res) => {
             attachChapterCounts(manhwasRaw)
         ]);
 
-        successResponse(res, { 
-            recents, 
+        successResponse(res, {
+            recents,
             trending,
-            manhwas 
+            manhwas
         }, {
             currentPage: page,
             totalPages: Math.ceil(totalManga / limit),
@@ -146,7 +146,7 @@ router.get('/manga-list', async (req, res) => {
                 .limit(limit)
                 .lean()
         ]);
-        
+
         const mangas = await attachChapterCounts(mangasRaw);
 
         successResponse(res, mangas, {
@@ -179,7 +179,7 @@ router.get('/manga/:slug', async (req, res) => {
         const chapters = await Chapter.find({ manga_id: manga._id })
             .select('title slug chapter_index createdAt')
             // Gunakan -1 untuk Descending (Chapter Terbesar/Terbaru paling atas)
-            .sort({ chapter_index: -1 }) 
+            .sort({ chapter_index: -1 })
             // PENTING: Tambahkan collation agar sorting angka akurat
             .collation({ locale: "en_US", numericOrdering: true })
             .lean();
@@ -200,36 +200,36 @@ router.get('/read/:slug/:chapterSlug', async (req, res) => {
         const manga = await Manga.findOne({ slug: req.params.slug })
             .select('_id title slug thumb')
             .lean();
-            
+
         if (!manga) return errorResponse(res, 'Manga not found', 404);
 
-        const chapter = await Chapter.findOne({ 
-            manga_id: manga._id, 
-            slug: req.params.chapterSlug 
+        const chapter = await Chapter.findOne({
+            manga_id: manga._id,
+            slug: req.params.chapterSlug
         }).lean();
 
         if (!chapter) return errorResponse(res, 'Chapter not found', 404);
         const [nextChap, prevChap] = await Promise.all([
-            Chapter.findOne({ 
-                manga_id: manga._id, 
-                chapter_index: { $gt: chapter.chapter_index } 
+            Chapter.findOne({
+                manga_id: manga._id,
+                chapter_index: { $gt: chapter.chapter_index }
             })
-            .sort({ chapter_index: 1 })
-            .select('slug title')
-            .collation({ locale: "en_US", numericOrdering: true }) 
-            .lean(),
-            Chapter.findOne({ 
-                manga_id: manga._id, 
-                chapter_index: { $lt: chapter.chapter_index } 
+                .sort({ chapter_index: 1 })
+                .select('slug title')
+                .collation({ locale: "en_US", numericOrdering: true })
+                .lean(),
+            Chapter.findOne({
+                manga_id: manga._id,
+                chapter_index: { $lt: chapter.chapter_index }
             })
-            .sort({ chapter_index: -1 })
-            .select('slug title')
-            .collation({ locale: "en_US", numericOrdering: true })
-            .lean()
+                .sort({ chapter_index: -1 })
+                .select('slug title')
+                .collation({ locale: "en_US", numericOrdering: true })
+                .lean()
         ]);
-        successResponse(res, { 
-            chapter, 
-            manga, 
+        successResponse(res, {
+            chapter,
+            manga,
             navigation: {
                 next: nextChap ? nextChap.slug : null,
                 prev: prevChap ? prevChap.slug : null
@@ -283,14 +283,14 @@ router.get('/genres', async (req, res) => {
         const genres = await Manga.aggregate([
             { $unwind: "$tags" }, // Pecah array tags menjadi dokumen terpisah
             // Filter tags kosong jika ada
-            { $match: { tags: { $ne: "" } } }, 
+            { $match: { tags: { $ne: "" } } },
             { $group: { _id: "$tags", count: { $sum: 1 } } },
             { $sort: { _id: 1 } }
         ]);
-        
+
         // Format output agar lebih bersih: [{name: "Action", count: 10}, ...]
         const formattedGenres = genres.map(g => ({ name: g._id, count: g.count }));
-        
+
         successResponse(res, formattedGenres);
     } catch (err) {
         errorResponse(res, err.message);
@@ -306,7 +306,7 @@ router.get('/filter/:type/:value', async (req, res) => {
         let query = {};
 
         if (type === 'genre') {
-            const cleanValue = value.replace(/-/g, '[\\s\\-]'); 
+            const cleanValue = value.replace(/-/g, '[\\s\\-]');
             query = { tags: { $regex: new RegExp(cleanValue, 'i') } };
         } else if (type === 'status') {
             query = { 'metadata.status': { $regex: `^${value}$`, $options: 'i' } };
@@ -352,21 +352,21 @@ router.post('/users/sync', async (req, res) => {
         // ==========================================
         // LOGIKA ADMIN: Taruh UID kamu di dalam array ini
         // ==========================================
-        const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13']; 
+        const ADMIN_UIDS = ['TPuc7EiYeFZcea9HGMe0mwl2ie13'];
         const isUserAdmin = ADMIN_UIDS.includes(googleId);
 
         let user = await User.findOne({ googleId });
         const today = new Date().toISOString().split('T')[0]; // Mendapatkan tanggal hari ini (YYYY-MM-DD)
-        
+
         // 1. JIKA USER BARU
         if (!user) {
-            user = new User({ 
-                googleId, 
-                email, 
+            user = new User({
+                googleId,
+                email,
                 displayName,
                 isAdmin: isUserAdmin,   // <--- Otomatis jadi admin jika UID cocok
                 isPremium: isUserAdmin, // <--- Admin otomatis dapet akses Premium
-                dailyDownloads: { date: today, count: 0 } 
+                dailyDownloads: { date: today, count: 0 }
             });
         } else {
             // 2. JIKA USER LAMA
@@ -474,7 +474,7 @@ router.delete('/users/:googleId/library/:slug', async (req, res) => {
     try {
         const { googleId, slug } = req.params;
         const user = await User.findOne({ googleId });
-        
+
         if (!user) return errorResponse(res, 'User not found', 404);
 
         // Hapus manga dengan slug yang cocok dari array library
@@ -493,7 +493,7 @@ router.delete('/users/:googleId/library', async (req, res) => {
     try {
         const { googleId } = req.params;
         const user = await User.findOne({ googleId });
-        
+
         if (!user) return errorResponse(res, 'User not found', 404);
 
         // Kosongkan array library
@@ -512,7 +512,7 @@ router.delete('/users/:googleId/history/:slug', async (req, res) => {
     try {
         const { googleId, slug } = req.params;
         const user = await User.findOne({ googleId });
-        
+
         if (!user) return errorResponse(res, 'User not found', 404);
 
         // Hapus history dengan slug yang cocok
@@ -532,7 +532,7 @@ router.delete('/users/:googleId/history', async (req, res) => {
         const { googleId } = req.params;
         const { type } = req.query; // Ambil tipe dari query parameter
         const user = await User.findOne({ googleId });
-        
+
         if (!user) return errorResponse(res, 'User not found', 404);
 
         if (type) {
@@ -543,7 +543,7 @@ router.delete('/users/:googleId/history', async (req, res) => {
             // Jika tidak ada tipe, kosongkan semua history
             user.history = [];
         }
-        
+
         await user.save();
 
         successResponse(res, { message: 'Riwayat bacaan berhasil dibersihkan' });
@@ -574,7 +574,7 @@ router.post('/users/:googleId/download', async (req, res) => {
         }
 
         // Jika user masih Premium ATAU Admin, langsung loloskan tanpa limit
-        if (user.isPremium || user.isAdmin) { 
+        if (user.isPremium || user.isAdmin) {
             await user.save(); // Simpan jika ada perubahan status kadaluarsa
             return successResponse(res, { allowed: true, isPremium: true });
         }
@@ -597,9 +597,9 @@ router.post('/users/:googleId/download', async (req, res) => {
         // Jika sudah mencapai batas
         if (user.dailyDownloads.count >= MAX_LIMIT) {
             await user.save();
-            return successResponse(res, { 
-                allowed: false, 
-                current: user.dailyDownloads.count, 
+            return successResponse(res, {
+                allowed: false,
+                current: user.dailyDownloads.count,
                 max: MAX_LIMIT,
                 message: "Batas unduhan harian (20) tercapai. Tunggu besok atau upgrade Premium!"
             });
@@ -610,10 +610,10 @@ router.post('/users/:googleId/download', async (req, res) => {
         user.downloadCount += 1; // Total seumur hidup
         await user.save();
 
-        successResponse(res, { 
-            allowed: true, 
-            current: user.dailyDownloads.count, 
-            max: MAX_LIMIT 
+        successResponse(res, {
+            allowed: true,
+            current: user.dailyDownloads.count,
+            max: MAX_LIMIT
         });
     } catch (err) {
         errorResponse(res, err.message);
@@ -634,7 +634,7 @@ router.post('/users/:googleId/set-premium', async (req, res) => {
 
         // 1. Set Status Premium
         user.isPremium = true;
-        
+
         // 2. Hitung tanggal kadaluarsa dari hari ini + jumlah hari (Cukup tulis SATU KALI saja)
         const expDate = new Date();
         expDate.setDate(expDate.getDate() + parseInt(days));
@@ -651,10 +651,10 @@ router.post('/users/:googleId/set-premium', async (req, res) => {
 
         // 4. Simpan ke Database
         await user.save();
-        
-        successResponse(res, { 
-            message: `Premium berhasil diaktifkan selama ${days} hari`, 
-            premiumUntil: user.premiumUntil 
+
+        successResponse(res, {
+            message: `Premium berhasil diaktifkan selama ${days} hari`,
+            premiumUntil: user.premiumUntil
         });
     } catch (err) {
         errorResponse(res, err.message);
@@ -721,11 +721,11 @@ router.get('/users/:googleId/notifications', async (req, res) => {
         const { googleId } = req.params;
         // Ambil hanya field notifikasi untuk efisiensi
         const user = await User.findOne({ googleId }).select('notifications').lean();
-        
+
         if (!user) return errorResponse(res, 'User not found', 404);
 
         // Urutkan notifikasi dari yang terbaru ke terlama sebelum mengirim
-        const sortedNotifications = (user.notifications || []).sort((a, b) => 
+        const sortedNotifications = (user.notifications || []).sort((a, b) =>
             new Date(b.createdAt) - new Date(a.createdAt)
         );
 
@@ -764,15 +764,43 @@ router.post('/settings/whatsapp', async (req, res) => {
     try {
         const { whatsapp } = req.body;
         let setting = await Settings.findOne({ key: 'whatsapp' });
-        
+
         if (!setting) {
             setting = new Settings({ key: 'whatsapp', value: whatsapp });
         } else {
             setting.value = whatsapp;
         }
-        
+
         await setting.save();
         res.json({ success: true, whatsapp: setting.value });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
+// GET /api/settings/telegram — Ambil username Telegram bot
+router.get('/settings/telegram', async (req, res) => {
+    try {
+        let setting = await Settings.findOne({ key: 'telegram_bot' });
+        res.json({ success: true, telegram: setting ? setting.value : '' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// POST /api/settings/telegram — Simpan username Telegram bot
+router.post('/settings/telegram', async (req, res) => {
+    try {
+        const { telegram } = req.body;
+        let setting = await Settings.findOne({ key: 'telegram_bot' });
+        if (!setting) {
+            setting = new Settings({ key: 'telegram_bot', value: telegram });
+        } else {
+            setting.value = telegram;
+        }
+        await setting.save();
+        res.json({ success: true, telegram: setting.value });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
