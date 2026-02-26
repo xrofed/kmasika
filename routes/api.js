@@ -783,22 +783,37 @@ module.exports = router;
 // Tidak langsung require di atas agar tidak circular jika bot belum init
 // Gunakan lazy require di dalam fungsi
 
-// GET /api/admin/orders — Ambil semua pending WA orders
-router.get('/admin/orders', isAdmin, (req, res) => {
+// GET /api/admin/orders — Ambil semua pending Telegram orders (dari MongoDB)
+router.get('/admin/orders', isAdmin, async (req, res) => {
     try {
-        const { getPendingOrders } = require('../bot/whatsapp');
-        const orders = getPendingOrders();
+        const { getPendingOrders } = require('../bot/telegram');
+        const orders = await getPendingOrders();
         successResponse(res, orders);
     } catch (err) {
-        errorResponse(res, 'Bot WhatsApp belum diinisialisasi: ' + err.message, 503);
+        errorResponse(res, err.message, 503);
     }
 });
 
 // POST /api/admin/orders/:orderKey/confirm — Konfirmasi & aktifkan premium
 router.post('/admin/orders/:orderKey/confirm', isAdmin, async (req, res) => {
     try {
-        const { confirmOrderFromApp } = require('../bot/whatsapp');
+        const { confirmOrderFromApp } = require('../bot/telegram');
         const result = await confirmOrderFromApp(req.params.orderKey);
+        if (result.success) {
+            successResponse(res, { message: 'Premium berhasil diaktifkan.' });
+        } else {
+            errorResponse(res, result.message, 400);
+        }
+    } catch (err) {
+        errorResponse(res, err.message);
+    }
+});
+
+// DELETE /api/admin/orders/:orderKey — Tolak order
+router.delete('/admin/orders/:orderKey', isAdmin, async (req, res) => {
+    try {
+        const { rejectOrderFromApp } = require('../bot/telegram');
+        const result = await rejectOrderFromApp(req.params.orderKey);
         if (result.success) {
             successResponse(res, { message: result.message });
         } else {
@@ -809,16 +824,13 @@ router.post('/admin/orders/:orderKey/confirm', isAdmin, async (req, res) => {
     }
 });
 
-// DELETE /api/admin/orders/:orderKey — Tolak / hapus order
-router.delete('/admin/orders/:orderKey', isAdmin, async (req, res) => {
+// POST /api/telegram/setup-webhook — Setup webhook URL Telegram (panggil sekali)
+router.post('/telegram/setup-webhook', isAdmin, async (req, res) => {
     try {
-        const { rejectOrderFromApp } = require('../bot/whatsapp');
-        const result = await rejectOrderFromApp(req.params.orderKey);
-        if (result.success) {
-            successResponse(res, { message: result.message });
-        } else {
-            errorResponse(res, result.message, 400);
-        }
+        const { setupWebhook } = require('../bot/telegram');
+        const webhookUrl = `${process.env.SITE_URL}/api/telegram/webhook`;
+        await setupWebhook(webhookUrl);
+        successResponse(res, { message: `Webhook terdaftar ke: ${webhookUrl}` });
     } catch (err) {
         errorResponse(res, err.message);
     }
